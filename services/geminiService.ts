@@ -2,8 +2,28 @@ import { GoogleGenAI, ThinkingLevel } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
 
-const ANALYSIS_MODEL = 'gemini-3.1-pro-preview';
+const ANALYSIS_MODEL = 'gemini-3-flash-preview';
 const SEARCH_MODEL = 'gemini-3-flash-preview';
+
+const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+const callWithRetry = async (fn: () => Promise<any>, maxRetries = 3, initialDelay = 2000) => {
+  let delay = initialDelay;
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      return await fn();
+    } catch (error: any) {
+      const isRateLimit = error?.message?.includes('429') || error?.status === 'RESOURCE_EXHAUSTED' || error?.message?.includes('quota');
+      if (isRateLimit && i < maxRetries - 1) {
+        console.warn(`Rate limit hit, retrying in ${delay}ms... (Attempt ${i + 1}/${maxRetries})`);
+        await sleep(delay);
+        delay *= 2; // Exponential backoff
+        continue;
+      }
+      throw error;
+    }
+  }
+};
 
 const getFinalPrompt = (): string => {
   return `
@@ -78,15 +98,15 @@ export const analyzeChartImage = async (base64ImageData: string, mimeType: strin
       },
     };
 
-    // Use Pro with Thinking for high-quality analysis
-    const response = await ai.models.generateContent({
+    // Use Flash for high-speed, high-quota analysis
+    const response = await callWithRetry(() => ai.models.generateContent({
       model: ANALYSIS_MODEL,
       contents: { parts: [{ text: getFinalPrompt() }, imagePart] },
       config: {
         responseMimeType: "application/json",
-        thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH }
+        thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } // Lower thinking level for Flash to save tokens/time
       }
-    });
+    }));
     
     if (!response || !response.text) {
         throw new Error("Empty response from AI.");
@@ -104,13 +124,13 @@ export const analyzeChartImage = async (base64ImageData: string, mimeType: strin
 
 export const getMarketContext = async (ticker: string): Promise<string> => {
   try {
-    const response = await ai.models.generateContent({
+    const response = await callWithRetry(() => ai.models.generateContent({
       model: SEARCH_MODEL,
       contents: `What is the current market sentiment and recent news for ${ticker}? Provide a brief summary for a trading analyst.`,
       config: {
         tools: [{ googleSearch: {} }],
       },
-    });
+    }));
     return response.text;
   } catch (error) {
     console.error("Error getting market context:", error);
